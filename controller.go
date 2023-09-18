@@ -6,6 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
@@ -52,6 +53,20 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			} else {
 				return []reconcile.Request{}
 			}
+		})).Watches(&source.Kind{Type: &corev1.Namespace{}}, handler.EnqueueRequestsFromMapFunc(
+		func(object client.Object) []reconcile.Request {
+			var results []reconcile.Request
+			sharingSecrets := &v1alpha1.SharingSecretList{}
+			if err := r.Client.List(context.Background(), sharingSecrets, &client.ListOptions{}); err != nil {
+				return results
+			}
+			namespace := object.(*corev1.Namespace)
+			for _, sharingSecret := range sharingSecrets.Items {
+				if match(sharingSecret, namespace) {
+					results = append(results, reconcile.Request{NamespacedName: types.NamespacedName{Name: sharingSecret.Name}})
+				}
+			}
+			return results
 		})).
 		For(&v1alpha1.SharingSecret{}).
 		Complete(r)
@@ -81,7 +96,7 @@ func (r *Reconciler) sync(ctx context.Context, sharingSecret *v1alpha1.SharingSe
 		for _, namespace := range sharingSecret.Spec.Target.Namespaces {
 			targetNamespaces.Insert(namespace.Name)
 		}
-	}else if  sharingSecret.Spec.Target.NamespaceSelector != nil {
+	} else if sharingSecret.Spec.Target.NamespaceSelector != nil {
 		selector, err := metav1.LabelSelectorAsSelector(sharingSecret.Spec.Target.NamespaceSelector)
 		if err != nil {
 			logger.Error(err, "failed to parse namespace selector")
@@ -159,6 +174,11 @@ func (r *Reconciler) createOrUpdateSecret(ctx context.Context, src *corev1.Secre
 			logger.Error(err, "failed to set owner reference")
 			return err
 		}
+		ns := &corev1.Namespace{}
+		if err := r.Get(ctx, types.NamespacedName{Name: namespace}, ns, &client.GetOptions{}); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+
 		if err := r.Create(ctx, created); err != nil {
 			logger.Error(err, "failed to create secret")
 			return err
@@ -199,4 +219,22 @@ func (r *Reconciler) cleanup(ctx context.Context, owner *v1alpha1.SharingSecret,
 		}
 	}
 	return nil
+}
+
+func match(sharingSecret v1alpha1.SharingSecret, namespace *corev1.Namespace) bool {
+	for _, ns := range sharingSecret.Spec.Target.Namespaces {
+		if ns.Name == namespace.Name {
+			return true
+		}
+	}
+	if sharingSecret.Spec.Target.NamespaceSelector != nil {
+		selector, err := metav1.LabelSelectorAsSelector(sharingSecret.Spec.Target.NamespaceSelector)
+		if err != nil {
+			return false
+		}
+		if selector.Matches(labels.Set(namespace.Labels)) {
+			return true
+		}
+	}
+	return false
 }
