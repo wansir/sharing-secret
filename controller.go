@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	controllerName   = "sharing-secret-controller"
-	sharingSecretRef = "experimental.kubesphere.io/sharingsecret-ref"
-	reconcilePeriod  = 5 * time.Second
+	controllerName                   = "sharing-secret-controller"
+	sharingSecretRef                 = "experimental.kubesphere.io/sharingsecret-ref"
+	defaultImagePullSecretAnnotation = "experimental.kubesphere.io/is-default-image-pull-secret"
+	reconcilePeriod                  = 5 * time.Second
 )
 
 // Reconciler reconciles a User object
@@ -202,6 +203,41 @@ func (r *Reconciler) createOrUpdateSecret(ctx context.Context, src *corev1.Secre
 			return err
 		}
 	}
+
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: namespace},
+	}
+	isDefaultImagePullSecret := owner.Annotations[defaultImagePullSecretAnnotation] == "true"
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
+		inDefaultPullSecrets := false
+		for _, secret := range sa.ImagePullSecrets {
+			if secret.Name == dist.Name {
+				inDefaultPullSecrets = true
+			}
+		}
+
+		if isDefaultImagePullSecret && !inDefaultPullSecrets {
+			sa.ImagePullSecrets = append(sa.ImagePullSecrets, corev1.LocalObjectReference{Name: dist.Name})
+			return nil
+		}
+
+		if !isDefaultImagePullSecret && inDefaultPullSecrets {
+			for i, secret := range sa.ImagePullSecrets {
+				if secret.Name == dist.Name {
+					sa.ImagePullSecrets = append(sa.ImagePullSecrets[:i], sa.ImagePullSecrets[i+1:]...)
+				}
+			}
+			return nil
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	logger.Info("default image pull secret successfully synced", "namespace", namespace, "secret", dist.Name, "operation", op)
 	return nil
 }
 
