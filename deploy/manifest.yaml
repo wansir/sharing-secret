@@ -15,6 +15,7 @@ rules:
       - 'secrets'
       - 'namespaces'
       - 'sharingsecrets'
+      - 'serviceaccounts'
     apiGroups:
       - '*'
 
@@ -56,6 +57,6 @@ spec:
         app: sharing-secret-controller
     spec:
       containers:
-        - image: wansir/sharing-secret-controller:latest
+        - image: wansir/sharing-secret-controller:v0.2.0
           imagePullPolicy: Always
           name: sharing-secret
