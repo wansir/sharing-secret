@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"reflect"
-	"runtime"
 	"sharingsecret/pkg/api/sharingsecret/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,28 +23,27 @@ import (
 )
 
 const (
-	controllerName                   = "sharing-secret-controller"
+	sharingSecretController          = "sharing-secret-controller"
 	sharingSecretRef                 = "experimental.kubesphere.io/sharingsecret-ref"
 	defaultImagePullSecretAnnotation = "experimental.kubesphere.io/is-default-image-pull-secret"
 	reconcilePeriod                  = 5 * time.Second
 )
 
-// Reconciler reconciles a User object
-type Reconciler struct {
+type SharingSecretReconciler struct {
 	recorder record.EventRecorder
 	logger   logr.Logger
 	client.Client
 }
 
-func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *SharingSecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Client = mgr.GetClient()
-	r.logger = ctrl.Log.WithName(controllerName)
-	r.recorder = mgr.GetEventRecorderFor(controllerName)
+	r.logger = ctrl.Log.WithName(sharingSecretController)
+	r.recorder = mgr.GetEventRecorderFor(sharingSecretController)
 
 	return ctrl.NewControllerManagedBy(mgr).
-		Named(controllerName).
+		Named(sharingSecretController).
 		WithOptions(controller.Options{
-			MaxConcurrentReconciles: runtime.NumCPU(),
+			MaxConcurrentReconciles: 2,
 		}).Watches(&source.Kind{Type: &corev1.Secret{}}, handler.EnqueueRequestsFromMapFunc(
 		func(object client.Object) []reconcile.Request {
 			sharingSecretName := object.GetLabels()[sharingSecretRef]
@@ -73,7 +71,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+func (r *SharingSecretReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	logger := r.logger.WithValues("sharingsecret", req.NamespacedName)
 	sharingSecret := &v1alpha1.SharingSecret{}
 	err := r.Get(ctx, req.NamespacedName, sharingSecret)
@@ -89,7 +87,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	return reconcile.Result{}, nil
 }
 
-func (r *Reconciler) sync(ctx context.Context, sharingSecret *v1alpha1.SharingSecret) error {
+func (r *SharingSecretReconciler) sync(ctx context.Context, sharingSecret *v1alpha1.SharingSecret) error {
 	logger := r.logger.WithValues("sharingsecret", sharingSecret.Name)
 	targetNamespaces := sets.NewString()
 
@@ -138,6 +136,21 @@ func (r *Reconciler) sync(ctx context.Context, sharingSecret *v1alpha1.SharingSe
 		}
 	}
 
+	if originSecret.Annotations[defaultImagePullSecretAnnotation] != sharingSecret.Annotations[defaultImagePullSecretAnnotation] {
+		if originSecret.Annotations == nil {
+			originSecret.Annotations = make(map[string]string, 0)
+		}
+		if sharingSecret.Annotations[defaultImagePullSecretAnnotation] == "" {
+			delete(originSecret.Annotations, defaultImagePullSecretAnnotation)
+		} else {
+			originSecret.Annotations[defaultImagePullSecretAnnotation] = sharingSecret.Annotations[defaultImagePullSecretAnnotation]
+		}
+		if err := r.Update(ctx, originSecret); err != nil {
+			logger.Error(err, "failed to update secret", "secret", sharingSecret.Spec.SecretRef)
+			return err
+		}
+	}
+
 	for _, namespace := range targetNamespaces.List() {
 		if err := r.createOrUpdateSecret(ctx, originSecret, sharingSecret, namespace); err != nil {
 			return err
@@ -146,7 +159,7 @@ func (r *Reconciler) sync(ctx context.Context, sharingSecret *v1alpha1.SharingSe
 	return nil
 }
 
-func (r *Reconciler) createOrUpdateSecret(ctx context.Context, src *corev1.Secret, owner *v1alpha1.SharingSecret, namespace string) error {
+func (r *SharingSecretReconciler) createOrUpdateSecret(ctx context.Context, src *corev1.Secret, owner *v1alpha1.SharingSecret, namespace string) error {
 	dist := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{
 		Namespace: namespace,
@@ -203,45 +216,10 @@ func (r *Reconciler) createOrUpdateSecret(ctx context.Context, src *corev1.Secre
 			return err
 		}
 	}
-
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: namespace},
-	}
-	isDefaultImagePullSecret := owner.Annotations[defaultImagePullSecretAnnotation] == "true"
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
-		inDefaultPullSecrets := false
-		for _, secret := range sa.ImagePullSecrets {
-			if secret.Name == dist.Name {
-				inDefaultPullSecrets = true
-			}
-		}
-
-		if isDefaultImagePullSecret && !inDefaultPullSecrets {
-			sa.ImagePullSecrets = append(sa.ImagePullSecrets, corev1.LocalObjectReference{Name: dist.Name})
-			return nil
-		}
-
-		if !isDefaultImagePullSecret && inDefaultPullSecrets {
-			for i, secret := range sa.ImagePullSecrets {
-				if secret.Name == dist.Name {
-					sa.ImagePullSecrets = append(sa.ImagePullSecrets[:i], sa.ImagePullSecrets[i+1:]...)
-				}
-			}
-			return nil
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return err
-	}
-
-	logger.Info("default image pull secret successfully synced", "namespace", namespace, "secret", dist.Name, "operation", op)
 	return nil
 }
 
-func (r *Reconciler) cleanup(ctx context.Context, owner *v1alpha1.SharingSecret, targetNamespaces sets.String) error {
+func (r *SharingSecretReconciler) cleanup(ctx context.Context, owner *v1alpha1.SharingSecret, targetNamespaces sets.String) error {
 	secrets := &corev1.SecretList{}
 	if err := r.List(ctx, secrets, &client.ListOptions{}); err != nil {
 		return err

@@ -31,9 +31,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Watch ReplicaSets and enqueue ReplicaSet object key
-	if err = (&sharingsecret.Reconciler{}).SetupWithManager(mgr); err != nil {
-		entryLog.Error(err, "unable to create controller")
+	if err = (&sharingsecret.SharingSecretReconciler{}).SetupWithManager(mgr); err != nil {
+		entryLog.Error(err, "unable to create SharingSecretReconciler")
+		os.Exit(1)
+	}
+
+	if err = (&sharingsecret.SecretReconciler{}).SetupWithManager(mgr); err != nil {
+		entryLog.Error(err, "unable to create SecretReconciler")
 		os.Exit(1)
 	}
 
